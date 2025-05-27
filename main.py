@@ -10,8 +10,6 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 
-import os
-
 class BitcoinDataset(Dataset):
     """
     Flexible dataset class that can handle price-only or multi-feature data
@@ -140,10 +138,10 @@ class BitcoinPredictionPipeline:
         self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.model_type = model_type
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         
         # Create output directory
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
         self.model = None
         self.dataset = None
@@ -163,7 +161,7 @@ class BitcoinPredictionPipeline:
         return f"{prefix}_{timestamp}"
         
     def save_checkpoint(self, epoch: int, is_best: bool = False, 
-                       checkpoint_name: Optional[str] = None) -> str:
+                       checkpoint_name: Optional[str] = None) -> Path:
         """
         Save training checkpoint
         
@@ -173,12 +171,12 @@ class BitcoinPredictionPipeline:
             checkpoint_name: Optional custom name for checkpoint
             
         Returns:
-            str: Path to saved checkpoint
+            Path: Path to saved checkpoint
         """
         if checkpoint_name is None:
             checkpoint_name = f"checkpoint_epoch_{epoch}"
             
-        checkpoint_path = os.path.join(self.output_dir, f"{checkpoint_name}.pth")
+        checkpoint_path = self.output_dir / f"{checkpoint_name}.pth"
         
         checkpoint = {
             'epoch': epoch,
@@ -202,7 +200,7 @@ class BitcoinPredictionPipeline:
         torch.save(checkpoint, checkpoint_path)
         
         if is_best:
-            best_model_path = os.path.join(self.output_dir, "best_model.pth")
+            best_model_path = self.output_dir / "best_model.pth"
             torch.save(checkpoint, best_model_path)
             
         return checkpoint_path
@@ -217,10 +215,12 @@ class BitcoinPredictionPipeline:
         Returns:
             Dict: Checkpoint data
         """
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        checkpoint_file = self.output_dir / checkpoint_path if not Path(checkpoint_path).is_absolute() else Path(checkpoint_path)
+        
+        if not checkpoint_file.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_file}")
             
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_file, map_location=self.device, weights_only=False)
         
         # Load model state
         if self.model is not None:
@@ -247,14 +247,14 @@ class BitcoinPredictionPipeline:
     
     def list_checkpoints(self) -> List[str]:
         """List all available checkpoints in output directory"""
-        if not os.path.exists(self.output_dir):
+        if not self.output_dir.exists():
             return []
             
-        checkpoints = [f for f in os.listdir(self.output_dir) if f.endswith('.pth')]
+        checkpoints = [f.name for f in self.output_dir.glob('*.pth')]
         checkpoints.sort()  # Sort by name (which includes timestamp)
         return checkpoints
     
-    def save_model_final(self, model_name: Optional[str] = None) -> str:
+    def save_model_final(self, model_name: Optional[str] = None) -> Path:
         """
         Save final trained model
         
@@ -262,12 +262,12 @@ class BitcoinPredictionPipeline:
             model_name: Optional custom name for the model
             
         Returns:
-            str: Path to saved model
+            Path: Path to saved model
         """
         if model_name is None:
             model_name = self.get_model_name("final_model")
             
-        model_path = os.path.join(self.output_dir, f"{model_name}.pth")
+        model_path = self.output_dir / f"{model_name}.pth"
         
         model_data = {
             'model_state_dict': self.model.state_dict(),
@@ -291,6 +291,7 @@ class BitcoinPredictionPipeline:
         
         torch.save(model_data, model_path)
         print(f"💾 Final model saved: {model_path}")
+        print(f"   💡 Note: Model contains sklearn objects, load with weights_only=False")
         return model_path
         
     def prepare_data(self, data: pd.DataFrame, target_col: str = 'close', 
@@ -356,9 +357,9 @@ class BitcoinPredictionPipeline:
         
         # Resume from checkpoint if specified
         if resume_from_checkpoint:
-            checkpoint_path = os.path.join(self.output_dir, resume_from_checkpoint)
-            if os.path.exists(checkpoint_path):
-                self.load_checkpoint(checkpoint_path)
+            checkpoint_path = self.output_dir / resume_from_checkpoint
+            if checkpoint_path.exists():
+                self.load_checkpoint(resume_from_checkpoint)
                 start_epoch = self.current_epoch + 1
                 print(f"🔄 Resuming training from epoch {start_epoch}")
             else:
@@ -439,7 +440,7 @@ class BitcoinPredictionPipeline:
             if (epoch + 1) % save_checkpoint_every == 0 or is_best:
                 checkpoint_path = self.save_checkpoint(epoch, is_best)
                 if not is_best:  # Don't print for best model (printed by save_checkpoint)
-                    tqdm.write(f"💾 Checkpoint saved: {os.path.basename(checkpoint_path)}")
+                    tqdm.write(f"💾 Checkpoint saved: {checkpoint_path.name}")
             
             # Update epoch progress bar
             epoch_pbar.set_postfix({
@@ -455,9 +456,9 @@ class BitcoinPredictionPipeline:
                 break
         
         # Load best model
-        best_model_path = os.path.join(self.output_dir, "best_model.pth")
-        if os.path.exists(best_model_path):
-            checkpoint = torch.load(best_model_path, map_location=self.device)
+        best_model_path = self.output_dir / "best_model.pth"
+        if best_model_path.exists():
+            checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'])
         
         epoch_pbar.close()
@@ -598,7 +599,11 @@ def load_trained_model(model_path: str, device: Optional[torch.device] = None) -
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    model_data = torch.load(model_path, map_location=device)
+    model_file = Path(model_path)
+    if not model_file.exists():
+        raise FileNotFoundError(f"Model file not found: {model_file}")
+    
+    model_data = torch.load(model_file, map_location=device, weights_only=False)
     config = model_data['model_config']
     
     # Recreate model
@@ -613,7 +618,7 @@ def load_trained_model(model_path: str, device: Optional[torch.device] = None) -
     model.load_state_dict(model_data['model_state_dict'])
     model.eval()
     
-    print(f"✅ Model loaded from: {model_path}")
+    print(f"✅ Model loaded from: {model_file}")
     print(f"   📊 Features: {config['feature_cols']}")
     print(f"   🎯 Best validation loss: {model_data['training_metrics']['best_val_loss']:.6f}")
     
@@ -628,7 +633,7 @@ def demonstrate_checkpointing():
     print("=" * 50)
     
     # Create a pipeline with custom output directory
-    pipeline = BitcoinPredictionPipeline(output_dir='.outputs/demo')
+    pipeline = BitcoinPredictionPipeline(output_dir=Path('.outputs') / 'demo')
     
     # Show available checkpoints
     checkpoints = pipeline.list_checkpoints()
@@ -683,7 +688,7 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
         hidden_size=hidden_size,
         num_layers=num_layers,
         learning_rate=learning_rate,
-        output_dir='.outputs/price_only'
+        output_dir=Path('.outputs') / 'price_only'
     )
     
     # Show existing checkpoints
@@ -743,7 +748,7 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
         hidden_size=hidden_size * 2,  # Larger hidden size for multi-feature
         num_layers=num_layers + 1,    # Extra layer for complexity
         learning_rate=learning_rate,
-        output_dir='.outputs/multi_feature'
+        output_dir=Path('.outputs') / 'multi_feature'
     )
     pipeline_enhanced.prepare_data(df_enhanced, target_col='close', feature_cols=feature_cols)
     
@@ -789,6 +794,8 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
     print("\n🎉 Pipeline execution completed successfully!")
     print("\n💡 To resume training from a checkpoint, use:")
     print("   pipeline.train(epochs=100, resume_from_checkpoint='checkpoint_epoch_50.pth')")
+    print("\n💡 To load a trained model for inference:")
+    print("   model, data = load_trained_model('.outputs/price_only/final_model_*.pth')")
     
     return pipeline, pipeline_enhanced
 
@@ -888,8 +895,9 @@ if __name__ == "__main__":
     USE_CONFIG = None  # Set to 'quick_test' or 'production' to use preset configs
     
     # Create outputs directory
-    os.makedirs('.outputs', exist_ok=True)
-    print(f"📁 Output directory: .outputs")
+    outputs_dir = Path('.outputs')
+    outputs_dir.mkdir(exist_ok=True)
+    print(f"📁 Output directory: {outputs_dir}")
     
     if USE_CONFIG and USE_CONFIG in CONFIGS:
         config = CONFIGS[USE_CONFIG]
@@ -940,10 +948,11 @@ if __name__ == "__main__":
     
     # Show how to list all checkpoints
     print("\n📋 All available checkpoints:")
-    for output_dir in ['.outputs/price_only', '.outputs/multi_feature']:
-        if os.path.exists(output_dir):
-            checkpoints = [f for f in os.listdir(output_dir) if f.endswith('.pth')]
-            print(f"\n📁 {output_dir}:")
+    for output_subdir in ['price_only', 'multi_feature']:
+        output_path = Path('.outputs') / output_subdir
+        if output_path.exists():
+            checkpoints = [f.name for f in output_path.glob('*.pth')]
+            print(f"\n📁 {output_path}:")
             for cp in sorted(checkpoints):
                 print(f"   📄 {cp}")
     
