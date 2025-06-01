@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- Use PEP 8 for Style Guide for Python.
+
+- Use PEP 257 for Docstring Conventions.
