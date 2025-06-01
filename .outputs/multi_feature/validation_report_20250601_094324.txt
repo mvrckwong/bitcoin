@@ -1,0 +1,40 @@
+================================================================================
+🔍 BITCOIN MODEL VALIDATION REPORT
+================================================================================
+
+📋 MODEL INFORMATION
+----------------------------------------
+Model Name: final_model_20250525_191331.pth
+Model Type: LSTM
+Training Date: 2025-05-25 19:13:31
+Features Used: close, volume, volatility, sma_20, rsi
+Feature Count: 5
+Sequence Length: 60
+Hidden Size: 256
+Number of Layers: 3
+Training Validation Loss: 0.000410
+
+📊 TEST RESULTS
+----------------------------------------
+MAE........................... $21,775.72
+MSE........................... $474,228,544.95
+RMSE.......................... $21,776.79
+MAPE.......................... 42.96%
+R²............................ -13649.680450
+Directional_Accuracy_%........ 51.69%
+
+🎯 PERFORMANCE ANALYSIS
+----------------------------------------
+MAPE Performance: Poor (42.96%)
+R² Performance: Poor (-13649.6805)
+Directional Accuracy: Poor (51.7%)
+
+💡 RECOMMENDATIONS
+----------------------------------------
+• Consider adding more features or increasing model complexity
+• Model may be underfitting - try larger network or more training
+• Poor directional accuracy - review feature engineering
+• High absolute error - consider price normalization or different loss function
+
+Report generated: 2025-06-01 09:43:24
+================================================================================

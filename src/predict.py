@@ -33,7 +33,6 @@ from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import execute_values
 import matplotlib.pyplot as plt
-from main import BitcoinPredictor, load_trained_model, BitcoinDataset, calculate_rsi
 from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
 warnings.filterwarnings('ignore')
 
@@ -415,6 +414,62 @@ class DatabaseManager:
             self.conn.close()
             print("✅ Database connection closed")
 
+    def view_predictions(self, limit: int = 10, order_by: str = 'timestamp DESC'):
+        """View predictions from the database
+        
+        Args:
+            limit (int): Number of records to return
+            order_by (str): SQL ORDER BY clause
+        """
+        if not self.conn:
+            print("❌ No database connection available")
+            return None
+            
+        try:
+            query = f"""
+                SELECT 
+                    id, timestamp, actual_price, predicted_price, 
+                    percentage_error, direction_actual, direction_predicted,
+                    direction_correct, success_status, confidence_score,
+                    model_name, prediction_horizon
+                FROM predictions 
+                ORDER BY {order_by}
+                LIMIT {limit}
+            """
+            
+            self.cursor.execute(query)
+            results = self.cursor.fetchall()
+            
+            if not results:
+                print("No predictions found in database")
+                return None
+                
+            # Convert to DataFrame for better display
+            columns = ['id', 'timestamp', 'actual_price', 'predicted_price', 
+                      'percentage_error', 'direction_actual', 'direction_predicted',
+                      'direction_correct', 'success_status', 'confidence_score',
+                      'model_name', 'prediction_horizon']
+            
+            df = pd.DataFrame(results, columns=columns)
+            
+            print("\n📊 Database Predictions:")
+            print("=" * 100)
+            print(df.to_string(index=False))
+            print("=" * 100)
+            
+            # Print summary statistics
+            print("\n📈 Summary Statistics:")
+            print(f"Total records shown: {len(df)}")
+            print(f"Success rate: {(df['success_status'] == 'SUCCESS').mean()*100:.1f}%")
+            print(f"Average error: {df['percentage_error'].mean():.2f}%")
+            print(f"Direction accuracy: {df['direction_correct'].mean()*100:.1f}%")
+            
+            return df
+            
+        except Exception as e:
+            print(f"❌ Error viewing predictions: {str(e)}")
+            return None
+
 class PredictionValidator:
     """Main class for prediction validation"""
     
@@ -765,6 +820,22 @@ def main():
     """Main function"""
     print("🔮 BITCOIN PREDICTION VALIDATOR")
     print("=" * 40)
+    
+    # Ask user what they want to do
+    print("\nWhat would you like to do?")
+    print("1. Run prediction validation")
+    print("2. View database predictions")
+    choice = input("Enter choice (1/2): ").strip()
+    
+    if choice == "2":
+        # Initialize database manager
+        db_manager = DatabaseManager()
+        if db_manager.conn:
+            limit = input("How many records to view? (default 10): ").strip()
+            limit = int(limit) if limit.isdigit() else 10
+            db_manager.view_predictions(limit=limit)
+        db_manager.close()
+        return
     
     # Create validation configuration
     config = create_custom_config()

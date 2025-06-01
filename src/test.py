@@ -724,15 +724,35 @@ def generate_test_data(days: int = 200, start_price: float = 50000) -> pd.DataFr
     prices = start_price + trend + seasonality + noise
     prices = np.maximum(prices, 0)  # Ensure prices are positive
     
+    # Generate synthetic volume data
+    base_volume = 1000000  # Base volume in USD
+    volume_trend = np.linspace(0, 500000, days)  # Increasing trend
+    volume_seasonality = 200000 * np.sin(np.linspace(0, 4*np.pi, days))  # Weekly seasonality
+    volume_noise = np.random.randn(days) * 100000  # Random noise
+    volumes = base_volume + volume_trend + volume_seasonality + volume_noise
+    volumes = np.maximum(volumes, 100000)  # Ensure minimum volume
+    
     df = pd.DataFrame({
         'date': dates,
-        'close': prices
+        'close': prices,
+        'volume': volumes
     })
     
-    # Add technical indicators
+    # Add technical indicators with proper NaN handling
+    # Calculate RSI
     df['rsi'] = calculate_rsi(df['close'])
-    df['sma_20'] = df['close'].rolling(20).mean().fillna(df['close'])
-    df['volatility'] = df['close'].rolling(20).std().fillna(0)
+    df['rsi'] = df['rsi'].fillna(50)  # Fill initial NaN with neutral RSI value
+    
+    # Calculate SMA
+    df['sma_20'] = df['close'].rolling(20).mean()
+    df['sma_20'] = df['sma_20'].fillna(method='bfill').fillna(method='ffill')
+    
+    # Calculate volatility
+    df['volatility'] = df['close'].rolling(20).std()
+    df['volatility'] = df['volatility'].fillna(method='bfill').fillna(method='ffill')
+    
+    # Ensure no NaN values remain
+    assert not df.isna().any().any(), "NaN values found in generated test data"
     
     return df
 
