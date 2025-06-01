@@ -1,14 +1,17 @@
 """
-test.py - Bitcoin Model Testing & Validation Script
+test_model_validation.py - Bitcoin Model Testing & Validation Script
 
-This standalone script tests and validates trained Bitcoin prediction models.
+This comprehensive script tests and validates trained Bitcoin prediction models.
 It automatically finds the latest model, loads it, and provides comprehensive evaluation.
 
-Usage: python test.py
+Usage: 
+    pytest tests/model_validation/test_model_validation.py
+    python tests/model_validation/test_model_validation.py
 
 Note: Handles PyTorch 2.6+ compatibility with weights_only=False for sklearn objects.
 """
 
+import pytest
 import torch
 import torch.nn as nn
 import numpy as np
@@ -804,6 +807,47 @@ def compare_models(finder: ModelFinder, test_data: pd.DataFrame, max_models: int
         print(f"   📈 Best MAPE: {best_mape['name']} ({best_mape['mape']:.2f}%)")
         print(f"   📊 Best R²: {best_r2['name']} ({best_r2['r2']:.4f})")
         print(f"   🎯 Best Direction: {best_dir['name']} ({best_dir['dir_acc']:.1f}%)")
+
+@pytest.mark.model_validation
+@pytest.mark.slow
+def test_model_validation_pipeline():
+    """Pytest wrapper for the complete model validation pipeline"""
+    print("🧪 Running model validation test pipeline...")
+    
+    # Find models
+    finder = ModelFinder()
+    latest_model = finder.find_latest_model()
+    
+    if not latest_model:
+        pytest.skip("No trained models found for validation")
+    
+    # Create tester
+    tester = ModelTester(latest_model)
+    
+    # Generate test data
+    test_data = generate_test_data(days=50)  # Smaller dataset for testing
+    
+    # Test the model
+    test_results = tester.test_on_data(test_data)
+    
+    # Basic assertions to ensure the test completed successfully
+    assert 'metrics' in test_results
+    assert 'predictions' in test_results
+    assert 'actuals' in test_results
+    
+    metrics = test_results['metrics']
+    
+    # Basic sanity checks
+    assert metrics['MAE'] > 0, "MAE should be positive"
+    assert metrics['MAPE'] > 0, "MAPE should be positive"
+    assert -1 <= metrics['R²'] <= 1, "R² should be between -1 and 1"
+    assert 0 <= metrics['Directional_Accuracy_%'] <= 100, "Directional accuracy should be a percentage"
+    
+    print(f"✅ Model validation completed successfully!")
+    print(f"   📊 MAE: ${metrics['MAE']:,.2f}")
+    print(f"   📈 MAPE: {metrics['MAPE']:.2f}%")
+    print(f"   📊 R²: {metrics['R²']:.4f}")
+    print(f"   🎯 Direction Accuracy: {metrics['Directional_Accuracy_%']:.1f}%")
 
 def main():
     """Main function to run model testing"""
