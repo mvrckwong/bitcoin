@@ -49,6 +49,7 @@ IS_DEBUG = os.getenv('IS_DEBUG', 'true').lower() == 'true'
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/bitcoin_predictions')
 engine = create_engine(DATABASE_URL)
 
+# Define SQLModel classes at module level
 class PredictionBase(SQLModel):
     """Base model for prediction data"""
     timestamp: str
@@ -91,6 +92,9 @@ class PredictionResult(PredictionBase):
     def to_dict(self) -> dict:
         """Convert to dictionary"""
         return self.dict()
+
+# Create tables
+SQLModel.metadata.create_all(engine)
 
 class ValidationConfig:
     """Configuration for validation criteria"""
@@ -314,9 +318,9 @@ class DatabaseManager:
         
         try:
             with Session(engine) as session:
-                # Convert PredictionResult to PredictionCreate
+                # Convert PredictionResult to Prediction (mapped class)
                 db_predictions = [
-                    PredictionCreate(
+                    Prediction(
                         id=str(uuid.uuid4()),
                         timestamp=result.timestamp,
                         actual_price=result.actual_price,
