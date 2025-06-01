@@ -1,21 +1,3 @@
-"""
-predict_validate.py - Bitcoin Prediction Validator
-
-This script loads trained models, makes predictions, validates them against actual
-data, and exports results to CSV format for analysis and database integration.
-
-Features:
-- Configurable success/failure criteria
-- Batch prediction processing
-- Detailed CSV export with all metrics
-- Database-ready format
-- Multiple validation scenarios
-
-Usage: python predict_validate.py
-"""
-
-import os
-import uuid
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -25,92 +7,20 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from dotenv import load_dotenv
 from sklearn.preprocessing import MinMaxScaler
-from sqlmodel import SQLModel, Field, Session, create_engine, select
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from models import calculate_rsi
 from core.setup_path import OUTPUT_DIR
+from database import DatabaseManager, PredictionResult
+from settings import (
+    ENVIRONMENT, ValidationConfig, ModelConfig,
+    DataConfig, PREDICTION_HORIZONS, MIN_PRICE, MAX_PRICE,
+    create_custom_config
+)
 
 warnings.filterwarnings('ignore')
-
-# Load environment variables
-load_dotenv()
-
-# Environment settings
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
-IS_DEBUG = os.getenv('IS_DEBUG', 'true').lower() == 'true'
-
-# SQLModel database setup
-DATABASE_URL = os.getenv(
-    'DATABASE_URL',
-    'postgresql://postgres:postgres@localhost:5432/bitcoin_predictions'
-)
-engine = create_engine(DATABASE_URL)
-
-
-# Define SQLModel classes at module level
-class PredictionBase(SQLModel):
-    """Base model for prediction data"""
-    timestamp: str
-    actual_price: float
-    predicted_price: float
-    absolute_error: float
-    percentage_error: float
-    direction_actual: str  # 'UP', 'DOWN', 'FLAT'
-    direction_predicted: str
-    direction_correct: bool
-    within_threshold: bool
-    success_status: str  # 'SUCCESS', 'FAILED', 'PARTIAL'
-    confidence_score: float
-    model_name: str
-    prediction_horizon: str  # '1day', '3day', '7day'
-    features_used: str
-    sequence_length: int
-
-
-class Prediction(PredictionBase, table=True):
-    """Database model for predictions"""
-    id: Optional[str] = Field(default=None, primary_key=True)
-
-
-class PredictionCreate(PredictionBase):
-    """Model for creating new predictions"""
-    pass
-
-
-class PredictionRead(PredictionBase):
-    """Model for reading predictions"""
-    id: str
-
-
-class PredictionResult(PredictionBase):
-    """Structure for individual prediction results"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-
-    @classmethod
-    def create(cls, **kwargs) -> 'PredictionResult':
-        """Create a new prediction result"""
-        return cls(**kwargs)
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary"""
-        return self.dict()
-
-
-# Create tables
-SQLModel.metadata.create_all(engine)
-
-
-class ValidationConfig:
-    """Configuration for validation criteria"""
-    price_threshold_percent: float = 5.0  # Success if within 5% of actual
-    direction_weight: float = 0.4  # 40% weight on direction accuracy
-    price_weight: float = 0.6  # 60% weight on price accuracy
-    min_confidence_threshold: float = 0.6  # Min confidence for success
-    flat_threshold_percent: float = 1.0  # Consider flat if change < 1%
 
 
 class BitcoinPredictor(nn.Module):
@@ -161,18 +71,20 @@ class BitcoinDataset(Dataset):
     """Dataset for prediction validation"""
 
     def __init__(self, data: pd.DataFrame, sequence_length: int = 60,
-                 target_col: str = 'close',
+                 target_col: str = None,
                  feature_cols: Optional[List[str]] = None,
                  scalers: Optional[Dict] = None):
+        # Use DataConfig defaults
+        data_config = DataConfig()
         self.sequence_length = sequence_length
-        self.target_col = target_col
+        self.target_col = target_col or data_config.target_column
 
         if feature_cols is None:
-            feature_cols = [target_col]
+            feature_cols = data_config.default_features
 
         self.feature_cols = feature_cols
-        if target_col not in feature_cols:
-            cols = feature_cols + [target_col]
+        if self.target_col not in feature_cols:
+            cols = feature_cols + [self.target_col]
         else:
             cols = feature_cols
         self.data = data[cols].copy()
@@ -300,157 +212,12 @@ class ModelLoader:
         return model, model_data, config, device
 
 
-class DatabaseManager:
-    """Handles database operations for prediction results"""
-
-    def __init__(self):
-        self.is_production = ENVIRONMENT == 'production'
-        print(f"🔧 Database Manager initialized")
-        print(f"   Environment: {ENVIRONMENT}")
-        print(f"   Is Production: {self.is_production}")
-
-        if self.is_production:
-            self._create_tables()
-
-    def _create_tables(self):
-        """Create database tables if they don't exist"""
-        SQLModel.metadata.create_all(engine)
-        print("✅ Database tables created/verified")
-
-    def verify_predictions(self, prediction_ids: List[str]) -> bool:
-        """Verify that predictions were saved to the database"""
-        if not self.is_production:
-            print("❌ No database connection available for verification")
-            return False
-
-        try:
-            with Session(engine) as session:
-                # Query to check if all predictions exist
-                statement = select(Prediction).where(
-                    Prediction.id.in_(prediction_ids)
-                )
-                results = session.exec(statement).all()
-
-                print(f"\n🔍 Database Verification:")
-                print(f"   Expected records: {len(prediction_ids)}")
-                print(f"   Found records: {len(results)}")
-
-                # Get sample of saved records
-                print("\n📋 Sample of saved records:")
-                for result in results[:5]:
-                    print(f"   ID: {result.id}")
-                    print(f"   Timestamp: {result.timestamp}")
-                    print(f"   Actual: ${result.actual_price:,.2f}")
-                    print(f"   Predicted: ${result.predicted_price:,.2f}")
-                    print(f"   Status: {result.success_status}")
-                    print("   ---")
-
-                return len(results) == len(prediction_ids)
-
-        except Exception as e:
-            print(f"❌ Error verifying predictions: {str(e)}")
-            return False
-
-    def save_predictions(self, results: List[PredictionResult]):
-        """Save prediction results to database"""
-        print(f"\n💾 Attempting to save {len(results)} predictions to database")
-        print(f"   Production mode: {self.is_production}")
-
-        if not self.is_production:
-            print("ℹ️ Skipping database save in development mode")
-            return
-
-        try:
-            with Session(engine) as session:
-                # Convert PredictionResult to Prediction (mapped class)
-                db_predictions = [
-                    Prediction(
-                        id=str(uuid.uuid4()),
-                        timestamp=result.timestamp,
-                        actual_price=result.actual_price,
-                        predicted_price=result.predicted_price,
-                        absolute_error=result.absolute_error,
-                        percentage_error=result.percentage_error,
-                        direction_actual=result.direction_actual,
-                        direction_predicted=result.direction_predicted,
-                        direction_correct=result.direction_correct,
-                        within_threshold=result.within_threshold,
-                        success_status=result.success_status,
-                        confidence_score=result.confidence_score,
-                        model_name=result.model_name,
-                        prediction_horizon=result.prediction_horizon,
-                        features_used=result.features_used,
-                        sequence_length=result.sequence_length
-                    ) for result in results
-                ]
-
-                # Add all predictions
-                for prediction in db_predictions:
-                    session.add(prediction)
-
-                session.commit()
-                print(f"✅ Successfully saved {len(results)} predictions to database")
-
-                # Verify the save
-                prediction_ids = [p.id for p in db_predictions]
-                if self.verify_predictions(prediction_ids):
-                    print("✅ Database verification successful")
-                else:
-                    print("⚠️ Database verification failed - some records may be missing")
-
-        except Exception as e:
-            print(f"❌ Error saving to database: {str(e)}")
-            print(f"   Error type: {type(e).__name__}")
-            print(f"   Error details: {str(e)}")
-
-    def view_predictions(self, limit: int = 10,
-                         order_by: str = 'timestamp DESC'):
-        """View predictions from the database"""
-        if not self.is_production:
-            print("❌ No database connection available")
-            return None
-
-        try:
-            with Session(engine) as session:
-                statement = select(Prediction).order_by(
-                    Prediction.timestamp.desc()
-                ).limit(limit)
-                results = session.exec(statement).all()
-
-                if not results:
-                    print("No predictions found in database")
-                    return None
-
-                # Convert to DataFrame for better display
-                df = pd.DataFrame([result.dict() for result in results])
-
-                print("\n📊 Database Predictions:")
-                print("=" * 100)
-                print(df.to_string(index=False))
-                print("=" * 100)
-
-                # Print summary statistics
-                print("\n📈 Summary Statistics:")
-                print(f"Total records shown: {len(df)}")
-                success_rate = (df['success_status'] == 'SUCCESS').mean() * 100
-                print(f"Success rate: {success_rate:.1f}%")
-                print(f"Average error: {df['percentage_error'].mean():.2f}%")
-                direction_acc = df['direction_correct'].mean() * 100
-                print(f"Direction accuracy: {direction_acc:.1f}%")
-
-                return df
-
-        except Exception as e:
-            print(f"❌ Error viewing predictions: {str(e)}")
-            return None
-
-
 class PredictionValidator:
     """Main class for prediction validation"""
 
     def __init__(self, model_path: Optional[str] = None,
-                 config: ValidationConfig = ValidationConfig()):
-        self.config = config
+                 config: Optional[ValidationConfig] = None):
+        self.config = config or ValidationConfig()
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
@@ -771,9 +538,9 @@ def generate_validation_data(days: int = 200,
         change = np.random.normal(trend + mean_reversion, volatility)
         new_price = prev_price * (1 + change)
 
-        # Prevent unrealistic prices
-        new_price = max(new_price, 10000)  # Min $10k
-        new_price = min(new_price, 200000)  # Max $200k
+        # Prevent unrealistic prices using settings constants
+        new_price = max(new_price, MIN_PRICE)
+        new_price = min(new_price, MAX_PRICE)
 
         prices.append(new_price)
 
@@ -782,7 +549,8 @@ def generate_validation_data(days: int = 200,
         'close': prices
     })
 
-    # Add required features
+    # Add required features using DataConfig
+    data_config = DataConfig()
     df['volume'] = np.random.randint(15000, 60000, len(df))
     df['volatility'] = df['close'].rolling(20, min_periods=1).std().fillna(0)
     df['sma_20'] = df['close'].rolling(20, min_periods=1).mean()
@@ -796,49 +564,6 @@ def generate_validation_data(days: int = 200,
     print(f"   📈 Total change: {price_change:.1f}%")
 
     return df
-
-
-def create_custom_config() -> ValidationConfig:
-    """Create custom validation configuration"""
-    print("\n⚙️ VALIDATION CONFIGURATION")
-    print("=" * 30)
-
-    config = ValidationConfig()
-
-    print(f"Current settings:")
-    print(f"  Price threshold: {config.price_threshold_percent}%")
-    print(f"  Direction weight: {config.direction_weight}")
-    print(f"  Price weight: {config.price_weight}")
-    print(f"  Min confidence: {config.min_confidence_threshold}")
-
-    # Ask user if they want to customize
-    customize = input("\nCustomize settings? (y/n): ").lower().strip()
-
-    if customize == 'y':
-        try:
-            threshold_input = input(
-                f"Price threshold % (current {config.price_threshold_percent}): "
-            )
-            threshold = float(threshold_input or config.price_threshold_percent)
-            config.price_threshold_percent = threshold
-
-            dir_weight_input = input(
-                f"Direction weight 0-1 (current {config.direction_weight}): "
-            )
-            dir_weight = float(dir_weight_input or config.direction_weight)
-            config.direction_weight = max(0, min(1, dir_weight))
-            config.price_weight = 1 - config.direction_weight
-
-            min_conf_input = input(
-                f"Min confidence 0-1 (current {config.min_confidence_threshold}): "
-            )
-            min_conf = float(min_conf_input or config.min_confidence_threshold)
-            config.min_confidence_threshold = max(0, min(1, min_conf))
-
-        except ValueError:
-            print("Invalid input, using defaults")
-
-    return config
 
 
 def main():
@@ -863,7 +588,7 @@ def main():
             db_manager.close()
         return
 
-    # Create validation configuration
+    # Create validation configuration using imported function
     config = create_custom_config()
 
     try:
@@ -895,8 +620,8 @@ def main():
         else:
             test_data = generate_validation_data()
 
-        # Choose prediction horizons
-        horizons = ['1day']  # Can extend to ['1day', '3day', '7day']
+        # Choose prediction horizons from settings
+        horizons = PREDICTION_HORIZONS[:1]  # Use first horizon from settings
 
         # Run validation
         results = validator.predict_and_validate(test_data, horizons)
