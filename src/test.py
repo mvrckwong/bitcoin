@@ -14,11 +14,9 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 from dataclasses import dataclass
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import MinMaxScaler
@@ -29,7 +27,6 @@ from core.setup_path import OUTPUT_DIR
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
-sns.set_palette("husl")
 
 @dataclass
 class ModelInfo:
