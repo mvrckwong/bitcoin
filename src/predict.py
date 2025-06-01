@@ -27,11 +27,27 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import warnings
+import uuid
+import os
+from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import execute_values
+import matplotlib.pyplot as plt
+from main import BitcoinPredictor, load_trained_model, BitcoinDataset, calculate_rsi
+from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
 warnings.filterwarnings('ignore')
+
+# Load environment variables
+load_dotenv()
+
+# Environment settings
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
+IS_DEBUG = os.getenv('IS_DEBUG', 'true').lower() == 'true'
 
 @dataclass
 class PredictionResult:
     """Structure for individual prediction results"""
+    id: str  # UUID for unique identification
     timestamp: str
     actual_price: float
     predicted_price: float
@@ -211,12 +227,201 @@ class ModelLoader:
         
         return model, model_data, config, device
 
+class DatabaseManager:
+    """Handles database operations for prediction results"""
+    
+    def __init__(self):
+        self.conn = None
+        self.cursor = None
+        self.is_production = ENVIRONMENT == 'production'
+        
+        print(f"🔧 Database Manager initialized")
+        print(f"   Environment: {ENVIRONMENT}")
+        print(f"   Is Production: {self.is_production}")
+        
+        if self.is_production:
+            self._connect()
+    
+    def _connect(self):
+        """Establish database connection"""
+        try:
+            print("🔌 Attempting database connection...")
+            print(f"   Host: {os.getenv('DB_HOST', 'localhost')}")
+            print(f"   Port: {os.getenv('DB_PORT', '5432')}")
+            print(f"   Database: {os.getenv('DB_NAME', 'bitcoin_predictions')}")
+            print(f"   User: {os.getenv('DB_USER', 'postgres')}")
+            
+            self.conn = psycopg2.connect(
+                host=os.getenv('DB_HOST', 'localhost'),
+                port=os.getenv('DB_PORT', '5432'),
+                dbname=os.getenv('DB_NAME', 'bitcoin_predictions'),
+                user=os.getenv('DB_USER', 'postgres'),
+                password=os.getenv('DB_PASSWORD', '')
+            )
+            self.cursor = self.conn.cursor()
+            print("✅ Database connection established")
+            
+            # Test the connection
+            self.cursor.execute("SELECT version();")
+            version = self.cursor.fetchone()
+            print(f"   PostgreSQL version: {version[0]}")
+            
+        except Exception as e:
+            print(f"❌ Database connection failed: {str(e)}")
+            print(f"   Error type: {type(e).__name__}")
+            self.is_production = False
+    
+    def verify_predictions(self, prediction_ids: List[str]) -> bool:
+        """Verify that predictions were saved to the database"""
+        if not self.conn:
+            print("❌ No database connection available for verification")
+            return False
+            
+        try:
+            # Convert list of IDs to a tuple for SQL IN clause
+            id_tuple = tuple(prediction_ids)
+            
+            # Query to check if all predictions exist
+            query = """
+                SELECT COUNT(*) 
+                FROM predictions 
+                WHERE id IN %s
+            """
+            
+            self.cursor.execute(query, (id_tuple,))
+            count = self.cursor.fetchone()[0]
+            
+            print(f"\n🔍 Database Verification:")
+            print(f"   Expected records: {len(prediction_ids)}")
+            print(f"   Found records: {count}")
+            
+            # Get sample of saved records
+            sample_query = """
+                SELECT id, timestamp, actual_price, predicted_price, success_status
+                FROM predictions 
+                WHERE id IN %s
+                LIMIT 5
+            """
+            
+            self.cursor.execute(sample_query, (id_tuple,))
+            samples = self.cursor.fetchall()
+            
+            print("\n📋 Sample of saved records:")
+            for sample in samples:
+                print(f"   ID: {sample[0]}")
+                print(f"   Timestamp: {sample[1]}")
+                print(f"   Actual: ${sample[2]:,.2f}")
+                print(f"   Predicted: ${sample[3]:,.2f}")
+                print(f"   Status: {sample[4]}")
+                print("   ---")
+            
+            return count == len(prediction_ids)
+            
+        except Exception as e:
+            print(f"❌ Error verifying predictions: {str(e)}")
+            return False
+    
+    def save_predictions(self, results: List[PredictionResult]):
+        """Save prediction results to database"""
+        print(f"\n💾 Attempting to save {len(results)} predictions to database")
+        print(f"   Production mode: {self.is_production}")
+        print(f"   Connection status: {'Connected' if self.conn else 'Not connected'}")
+        
+        if not self.is_production:
+            print("ℹ️ Skipping database save in development mode")
+            return
+        
+        if not self.conn:
+            print("❌ No database connection available")
+            return
+        
+        try:
+            # Store IDs for verification
+            prediction_ids = [result.id for result in results]
+            
+            # Prepare data for insertion
+            data = [(
+                result.id,
+                result.timestamp,
+                result.actual_price,
+                result.predicted_price,
+                result.absolute_error,
+                result.percentage_error,
+                result.direction_actual,
+                result.direction_predicted,
+                result.direction_correct,
+                result.within_threshold,
+                result.success_status,
+                result.confidence_score,
+                result.model_name,
+                result.prediction_horizon,
+                result.features_used,
+                result.sequence_length
+            ) for result in results]
+            
+            print(f"📦 Prepared {len(data)} records for insertion")
+            
+            # SQL query for insertion
+            query = """
+                INSERT INTO predictions (
+                    id, timestamp, actual_price, predicted_price, absolute_error,
+                    percentage_error, direction_actual, direction_predicted,
+                    direction_correct, within_threshold, success_status,
+                    confidence_score, model_name, prediction_horizon,
+                    features_used, sequence_length
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    timestamp = EXCLUDED.timestamp,
+                    actual_price = EXCLUDED.actual_price,
+                    predicted_price = EXCLUDED.predicted_price,
+                    absolute_error = EXCLUDED.absolute_error,
+                    percentage_error = EXCLUDED.percentage_error,
+                    direction_actual = EXCLUDED.direction_actual,
+                    direction_predicted = EXCLUDED.direction_predicted,
+                    direction_correct = EXCLUDED.direction_correct,
+                    within_threshold = EXCLUDED.within_threshold,
+                    success_status = EXCLUDED.success_status,
+                    confidence_score = EXCLUDED.confidence_score,
+                    model_name = EXCLUDED.model_name,
+                    prediction_horizon = EXCLUDED.prediction_horizon,
+                    features_used = EXCLUDED.features_used,
+                    sequence_length = EXCLUDED.sequence_length
+            """
+            
+            print("📝 Executing database query...")
+            # Execute the query
+            execute_values(self.cursor, query, data)
+            self.conn.commit()
+            print(f"✅ Successfully saved {len(results)} predictions to database")
+            
+            # Verify the save
+            if self.verify_predictions(prediction_ids):
+                print("✅ Database verification successful")
+            else:
+                print("⚠️ Database verification failed - some records may be missing")
+            
+        except Exception as e:
+            print(f"❌ Error saving to database: {str(e)}")
+            print(f"   Error type: {type(e).__name__}")
+            print(f"   Error details: {str(e)}")
+            self.conn.rollback()
+    
+    def close(self):
+        """Close database connection"""
+        if self.cursor:
+            self.cursor.close()
+            print("✅ Database cursor closed")
+        if self.conn:
+            self.conn.close()
+            print("✅ Database connection closed")
+
 class PredictionValidator:
     """Main class for prediction validation"""
     
     def __init__(self, model_path: Optional[str] = None, config: ValidationConfig = ValidationConfig()):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.db_manager = DatabaseManager()
         
         # Load model
         if model_path:
@@ -324,6 +529,7 @@ class PredictionValidator:
         )
         
         return PredictionResult(
+            id=str(uuid.uuid4()),
             timestamp=str(timestamp),
             actual_price=round(actual_price, 2),
             predicted_price=round(predicted_price, 2),
@@ -384,7 +590,15 @@ class PredictionValidator:
     
     def export_to_csv(self, results: List[PredictionResult], 
                      filename: Optional[str] = None) -> str:
-        """Export results to CSV format"""
+        """Export results to CSV format and optionally to database"""
+        
+        print(f"\n📊 Exporting results...")
+        print(f"   Environment: {ENVIRONMENT}")
+        print(f"   Total results: {len(results)}")
+        
+        # Create .outputs directory if it doesn't exist
+        output_dir = Path('.outputs')
+        output_dir.mkdir(exist_ok=True)
         
         if not filename:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -405,6 +619,7 @@ class PredictionValidator:
         
         # Create summary row
         summary_data = {
+            'id': 'SUMMARY',
             'timestamp': 'SUMMARY',
             'actual_price': 0,
             'predicted_price': 0,
@@ -426,9 +641,24 @@ class PredictionValidator:
         summary_df = pd.DataFrame([summary_data])
         final_df = pd.concat([df, summary_df], ignore_index=True)
         
-        # Save to CSV
-        output_path = Path(filename)
+        # Save to CSV in .outputs directory
+        output_path = output_dir / filename
         final_df.to_csv(output_path, index=False)
+        print(f"✅ CSV saved to: {output_path.absolute()}")
+        
+        # Save to database if in production mode
+        if ENVIRONMENT == 'production':
+            print("\n💾 Attempting database save...")
+            # Filter out the summary row before saving to database
+            db_results = [r for r in results if r.id != 'SUMMARY']
+            print(f"   Filtered {len(db_results)} records for database (excluding summary)")
+            
+            if db_results:
+                self.db_manager.save_predictions(db_results)
+            else:
+                print("⚠️ No valid records to save to database")
+        else:
+            print("\nℹ️ Skipping database save (not in production mode)")
         
         print(f"\n📊 PREDICTION VALIDATION SUMMARY")
         print("=" * 50)
@@ -439,18 +669,13 @@ class PredictionValidator:
         print(f"🎯 Direction Accuracy: {direction_accuracy:.1f}%")
         print(f"📈 Avg Error: {avg_percentage_error:.2f}%")
         print(f"🔒 Avg Confidence: {avg_confidence:.3f}")
-        print(f"\n💾 Results exported to: {output_path.absolute()}")
         
         return str(output_path)
-
-def calculate_rsi(prices, window=14):
-    """Calculate RSI technical indicator"""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    
+    def __del__(self):
+        """Cleanup database connection"""
+        if hasattr(self, 'db_manager'):
+            self.db_manager.close()
 
 def generate_validation_data(days: int = 200, start_price: float = 50000) -> pd.DataFrame:
     """Generate test data for validation"""

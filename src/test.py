@@ -24,6 +24,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
@@ -608,44 +609,131 @@ class ModelTester:
         
         return report_text
 
-def calculate_rsi(prices, window=14):
-    """Calculate RSI technical indicator"""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def load_trained_model(model_path: str, device: Optional[torch.device] = None) -> Tuple[BitcoinPredictor, Dict]:
+    """
+    Load a trained model from file
+    
+    Args:
+        model_path: Path to the saved model
+        device: Device to load model on
+        
+    Returns:
+        Tuple of (model, model_data)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model_file = Path(model_path)
+    if not model_file.exists():
+        raise FileNotFoundError(f"Model file not found: {model_file}")
+    
+    model_data = torch.load(model_file, map_location=device, weights_only=False)
+    config = model_data['model_config']
+    
+    # Recreate model
+    model = BitcoinPredictor(
+        input_size=config['input_size'],
+        hidden_size=config['hidden_size'],
+        num_layers=config['num_layers'],
+        model_type=config['model_type']
+    ).to(device)
+    
+    # Load weights
+    model.load_state_dict(model_data['model_state_dict'])
+    model.eval()
+    
+    print(f"✅ Model loaded from: {model_file}")
+    print(f"   📊 Features: {config['feature_cols']}")
+    print(f"   🎯 Best validation loss: {model_data['training_metrics']['best_val_loss']:.6f}")
+    
+    return model, model_data
 
-def generate_test_data(days: int = 100, start_price: float = 50000) -> pd.DataFrame:
-    """Generate synthetic test data for model validation"""
-    print(f"\n🔢 Generating {days} days of synthetic test data...")
+def evaluate_model(model: BitcoinPredictor, test_data: pd.DataFrame, 
+                  model_data: Dict) -> Dict[str, float]:
+    """
+    Evaluate model performance on test data
     
-    dates = pd.date_range(start='2024-01-01', periods=days, freq='D')
-    np.random.seed(123)  # Different seed from training data
+    Args:
+        model: Trained model
+        test_data: Test dataset
+        model_data: Model configuration and scalers
+        
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    # Create test dataset
+    test_dataset = BitcoinDataset(
+        data=test_data,
+        sequence_length=model_data['model_config']['sequence_length'],
+        target_col='close',
+        feature_cols=model_data['model_config']['feature_cols']
+    )
     
-    # Generate price with trend and volatility
-    price_changes = np.random.normal(0.001, 0.02, days)  # Small upward trend with 2% volatility
-    price_changes[0] = 0  # First day no change
+    # Make predictions
+    model.eval()
+    predictions = []
+    actuals = []
     
-    prices = [start_price]
-    for change in price_changes[1:]:
-        new_price = prices[-1] * (1 + change)
-        prices.append(max(new_price, 1000))  # Prevent negative prices
+    with torch.no_grad():
+        for sequence, target in test_dataset:
+            sequence = sequence.unsqueeze(0)  # Add batch dimension
+            prediction = model(sequence)
+            
+            # Convert back to original scale
+            pred_price = test_dataset.inverse_transform_target(prediction.item())
+            actual_price = test_dataset.inverse_transform_target(target.item())
+            
+            predictions.append(pred_price)
+            actuals.append(actual_price)
+    
+    # Calculate metrics
+    predictions = np.array(predictions)
+    actuals = np.array(actuals)
+    
+    mae = np.mean(np.abs(predictions - actuals))
+    mse = np.mean((predictions - actuals)**2)
+    rmse = np.sqrt(mse)
+    mape = np.mean(np.abs((actuals - predictions) / actuals)) * 100
+    
+    return {
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse,
+        'MAPE': mape
+    }
+
+def generate_test_data(days: int = 200, start_price: float = 50000) -> pd.DataFrame:
+    """
+    Generate synthetic test data
+    
+    Args:
+        days: Number of days to generate
+        start_price: Starting price
+        
+    Returns:
+        DataFrame with synthetic price data
+    """
+    dates = pd.date_range('2024-01-01', periods=days, freq='D')
+    np.random.seed(42)
+    
+    # Generate prices with some trend and seasonality
+    trend = np.linspace(0, 1000, days)
+    seasonality = 100 * np.sin(np.linspace(0, 4*np.pi, days))
+    noise = np.random.randn(days) * 100
+    
+    prices = start_price + trend + seasonality + noise
+    prices = np.maximum(prices, 0)  # Ensure prices are positive
     
     df = pd.DataFrame({
         'date': dates,
         'close': prices
     })
     
-    # Add volume and technical indicators
-    df['volume'] = np.random.randint(10000, 50000, len(df))
-    df['volatility'] = df['close'].rolling(20, min_periods=1).std().fillna(0)
-    df['sma_20'] = df['close'].rolling(20, min_periods=1).mean()
-    df['rsi'] = calculate_rsi(df['close']).fillna(50)
+    # Add technical indicators
+    df['rsi'] = calculate_rsi(df['close'])
+    df['sma_20'] = df['close'].rolling(20).mean().fillna(df['close'])
+    df['volatility'] = df['close'].rolling(20).std().fillna(0)
     
-    print(f"✅ Test data generated: {len(df)} records")
-    print(f"   📊 Price range: ${df['close'].min():,.2f} - ${df['close'].max():,.2f}")
     return df
 
 def compare_models(finder: ModelFinder, test_data: pd.DataFrame, max_models: int = 3):
@@ -774,4 +862,4 @@ def main():
             compare_models(finder, test_data)
 
 if __name__ == "__main__":
-    main()
+    main() 

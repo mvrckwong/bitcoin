@@ -2,6 +2,7 @@
 uv.lock
 *.pth
 *.ipynb
+.outputs/*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
