@@ -34,6 +34,8 @@ import psycopg2
 from psycopg2.extras import execute_values
 import matplotlib.pyplot as plt
 from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
+from sqlmodel import SQLModel, Field, Session, create_engine, select
+from core.setup_path import OUTPUT_DIR
 warnings.filterwarnings('ignore')
 
 # Load environment variables
@@ -43,10 +45,12 @@ load_dotenv()
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 IS_DEBUG = os.getenv('IS_DEBUG', 'true').lower() == 'true'
 
-@dataclass
-class PredictionResult:
-    """Structure for individual prediction results"""
-    id: str  # UUID for unique identification
+# SQLModel database setup
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/bitcoin_predictions')
+engine = create_engine(DATABASE_URL)
+
+class PredictionBase(SQLModel):
+    """Base model for prediction data"""
     timestamp: str
     actual_price: float
     predicted_price: float
@@ -63,7 +67,31 @@ class PredictionResult:
     features_used: str
     sequence_length: int
 
-@dataclass
+class Prediction(PredictionBase, table=True):
+    """Database model for predictions"""
+    id: Optional[str] = Field(default=None, primary_key=True)
+
+class PredictionCreate(PredictionBase):
+    """Model for creating new predictions"""
+    pass
+
+class PredictionRead(PredictionBase):
+    """Model for reading predictions"""
+    id: str
+
+class PredictionResult(PredictionBase):
+    """Structure for individual prediction results"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+
+    @classmethod
+    def create(cls, **kwargs) -> 'PredictionResult':
+        """Create a new prediction result"""
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary"""
+        return self.dict()
+
 class ValidationConfig:
     """Configuration for validation criteria"""
     price_threshold_percent: float = 5.0  # Success if within 5% of actual
@@ -174,9 +202,9 @@ class ModelLoader:
     """Utility to load trained models"""
     
     @staticmethod
-    def load_latest_model(base_dir: str = '.outputs') -> Optional[Tuple]:
+    def load_latest_model(base_dir: str = None) -> Optional[Tuple]:
         """Load the latest trained model"""
-        base_path = Path(base_dir)
+        base_path = Path(base_dir) if base_dir else OUTPUT_DIR
         
         if not base_path.exists():
             print(f"❌ Output directory not found: {base_path}")
@@ -230,91 +258,46 @@ class DatabaseManager:
     """Handles database operations for prediction results"""
     
     def __init__(self):
-        self.conn = None
-        self.cursor = None
         self.is_production = ENVIRONMENT == 'production'
-        
         print(f"🔧 Database Manager initialized")
         print(f"   Environment: {ENVIRONMENT}")
         print(f"   Is Production: {self.is_production}")
         
         if self.is_production:
-            self._connect()
+            self._create_tables()
     
-    def _connect(self):
-        """Establish database connection"""
-        try:
-            print("🔌 Attempting database connection...")
-            print(f"   Host: {os.getenv('DB_HOST', 'localhost')}")
-            print(f"   Port: {os.getenv('DB_PORT', '5432')}")
-            print(f"   Database: {os.getenv('DB_NAME', 'bitcoin_predictions')}")
-            print(f"   User: {os.getenv('DB_USER', 'postgres')}")
-            
-            self.conn = psycopg2.connect(
-                host=os.getenv('DB_HOST', 'localhost'),
-                port=os.getenv('DB_PORT', '5432'),
-                dbname=os.getenv('DB_NAME', 'bitcoin_predictions'),
-                user=os.getenv('DB_USER', 'postgres'),
-                password=os.getenv('DB_PASSWORD', '')
-            )
-            self.cursor = self.conn.cursor()
-            print("✅ Database connection established")
-            
-            # Test the connection
-            self.cursor.execute("SELECT version();")
-            version = self.cursor.fetchone()
-            print(f"   PostgreSQL version: {version[0]}")
-            
-        except Exception as e:
-            print(f"❌ Database connection failed: {str(e)}")
-            print(f"   Error type: {type(e).__name__}")
-            self.is_production = False
+    def _create_tables(self):
+        """Create database tables if they don't exist"""
+        SQLModel.metadata.create_all(engine)
+        print("✅ Database tables created/verified")
     
     def verify_predictions(self, prediction_ids: List[str]) -> bool:
         """Verify that predictions were saved to the database"""
-        if not self.conn:
+        if not self.is_production:
             print("❌ No database connection available for verification")
             return False
             
         try:
-            # Convert list of IDs to a tuple for SQL IN clause
-            id_tuple = tuple(prediction_ids)
-            
-            # Query to check if all predictions exist
-            query = """
-                SELECT COUNT(*) 
-                FROM predictions 
-                WHERE id IN %s
-            """
-            
-            self.cursor.execute(query, (id_tuple,))
-            count = self.cursor.fetchone()[0]
-            
-            print(f"\n🔍 Database Verification:")
-            print(f"   Expected records: {len(prediction_ids)}")
-            print(f"   Found records: {count}")
-            
-            # Get sample of saved records
-            sample_query = """
-                SELECT id, timestamp, actual_price, predicted_price, success_status
-                FROM predictions 
-                WHERE id IN %s
-                LIMIT 5
-            """
-            
-            self.cursor.execute(sample_query, (id_tuple,))
-            samples = self.cursor.fetchall()
-            
-            print("\n📋 Sample of saved records:")
-            for sample in samples:
-                print(f"   ID: {sample[0]}")
-                print(f"   Timestamp: {sample[1]}")
-                print(f"   Actual: ${sample[2]:,.2f}")
-                print(f"   Predicted: ${sample[3]:,.2f}")
-                print(f"   Status: {sample[4]}")
-                print("   ---")
-            
-            return count == len(prediction_ids)
+            with Session(engine) as session:
+                # Query to check if all predictions exist
+                statement = select(Prediction).where(Prediction.id.in_(prediction_ids))
+                results = session.exec(statement).all()
+                
+                print(f"\n🔍 Database Verification:")
+                print(f"   Expected records: {len(prediction_ids)}")
+                print(f"   Found records: {len(results)}")
+                
+                # Get sample of saved records
+                print("\n📋 Sample of saved records:")
+                for result in results[:5]:
+                    print(f"   ID: {result.id}")
+                    print(f"   Timestamp: {result.timestamp}")
+                    print(f"   Actual: ${result.actual_price:,.2f}")
+                    print(f"   Predicted: ${result.predicted_price:,.2f}")
+                    print(f"   Status: {result.success_status}")
+                    print("   ---")
+                
+                return len(results) == len(prediction_ids)
             
         except Exception as e:
             print(f"❌ Error verifying predictions: {str(e)}")
@@ -324,148 +307,86 @@ class DatabaseManager:
         """Save prediction results to database"""
         print(f"\n💾 Attempting to save {len(results)} predictions to database")
         print(f"   Production mode: {self.is_production}")
-        print(f"   Connection status: {'Connected' if self.conn else 'Not connected'}")
         
         if not self.is_production:
             print("ℹ️ Skipping database save in development mode")
             return
         
-        if not self.conn:
-            print("❌ No database connection available")
-            return
-        
         try:
-            # Store IDs for verification
-            prediction_ids = [result.id for result in results]
-            
-            # Prepare data for insertion
-            data = [(
-                result.id,
-                result.timestamp,
-                result.actual_price,
-                result.predicted_price,
-                result.absolute_error,
-                result.percentage_error,
-                result.direction_actual,
-                result.direction_predicted,
-                result.direction_correct,
-                result.within_threshold,
-                result.success_status,
-                result.confidence_score,
-                result.model_name,
-                result.prediction_horizon,
-                result.features_used,
-                result.sequence_length
-            ) for result in results]
-            
-            print(f"📦 Prepared {len(data)} records for insertion")
-            
-            # SQL query for insertion
-            query = """
-                INSERT INTO predictions (
-                    id, timestamp, actual_price, predicted_price, absolute_error,
-                    percentage_error, direction_actual, direction_predicted,
-                    direction_correct, within_threshold, success_status,
-                    confidence_score, model_name, prediction_horizon,
-                    features_used, sequence_length
-                ) VALUES %s
-                ON CONFLICT (id) DO UPDATE SET
-                    timestamp = EXCLUDED.timestamp,
-                    actual_price = EXCLUDED.actual_price,
-                    predicted_price = EXCLUDED.predicted_price,
-                    absolute_error = EXCLUDED.absolute_error,
-                    percentage_error = EXCLUDED.percentage_error,
-                    direction_actual = EXCLUDED.direction_actual,
-                    direction_predicted = EXCLUDED.direction_predicted,
-                    direction_correct = EXCLUDED.direction_correct,
-                    within_threshold = EXCLUDED.within_threshold,
-                    success_status = EXCLUDED.success_status,
-                    confidence_score = EXCLUDED.confidence_score,
-                    model_name = EXCLUDED.model_name,
-                    prediction_horizon = EXCLUDED.prediction_horizon,
-                    features_used = EXCLUDED.features_used,
-                    sequence_length = EXCLUDED.sequence_length
-            """
-            
-            print("📝 Executing database query...")
-            # Execute the query
-            execute_values(self.cursor, query, data)
-            self.conn.commit()
-            print(f"✅ Successfully saved {len(results)} predictions to database")
-            
-            # Verify the save
-            if self.verify_predictions(prediction_ids):
-                print("✅ Database verification successful")
-            else:
-                print("⚠️ Database verification failed - some records may be missing")
+            with Session(engine) as session:
+                # Convert PredictionResult to PredictionCreate
+                db_predictions = [
+                    PredictionCreate(
+                        id=str(uuid.uuid4()),
+                        timestamp=result.timestamp,
+                        actual_price=result.actual_price,
+                        predicted_price=result.predicted_price,
+                        absolute_error=result.absolute_error,
+                        percentage_error=result.percentage_error,
+                        direction_actual=result.direction_actual,
+                        direction_predicted=result.direction_predicted,
+                        direction_correct=result.direction_correct,
+                        within_threshold=result.within_threshold,
+                        success_status=result.success_status,
+                        confidence_score=result.confidence_score,
+                        model_name=result.model_name,
+                        prediction_horizon=result.prediction_horizon,
+                        features_used=result.features_used,
+                        sequence_length=result.sequence_length
+                    ) for result in results
+                ]
+                
+                # Add all predictions
+                for prediction in db_predictions:
+                    session.add(prediction)
+                
+                session.commit()
+                print(f"✅ Successfully saved {len(results)} predictions to database")
+                
+                # Verify the save
+                prediction_ids = [p.id for p in db_predictions]
+                if self.verify_predictions(prediction_ids):
+                    print("✅ Database verification successful")
+                else:
+                    print("⚠️ Database verification failed - some records may be missing")
             
         except Exception as e:
             print(f"❌ Error saving to database: {str(e)}")
             print(f"   Error type: {type(e).__name__}")
             print(f"   Error details: {str(e)}")
-            self.conn.rollback()
     
-    def close(self):
-        """Close database connection"""
-        if self.cursor:
-            self.cursor.close()
-            print("✅ Database cursor closed")
-        if self.conn:
-            self.conn.close()
-            print("✅ Database connection closed")
-
     def view_predictions(self, limit: int = 10, order_by: str = 'timestamp DESC'):
-        """View predictions from the database
-        
-        Args:
-            limit (int): Number of records to return
-            order_by (str): SQL ORDER BY clause
-        """
-        if not self.conn:
+        """View predictions from the database"""
+        if not self.is_production:
             print("❌ No database connection available")
             return None
             
         try:
-            query = f"""
-                SELECT 
-                    id, timestamp, actual_price, predicted_price, 
-                    percentage_error, direction_actual, direction_predicted,
-                    direction_correct, success_status, confidence_score,
-                    model_name, prediction_horizon
-                FROM predictions 
-                ORDER BY {order_by}
-                LIMIT {limit}
-            """
-            
-            self.cursor.execute(query)
-            results = self.cursor.fetchall()
-            
-            if not results:
-                print("No predictions found in database")
-                return None
+            with Session(engine) as session:
+                statement = select(Prediction).order_by(Prediction.timestamp.desc()).limit(limit)
+                results = session.exec(statement).all()
                 
-            # Convert to DataFrame for better display
-            columns = ['id', 'timestamp', 'actual_price', 'predicted_price', 
-                      'percentage_error', 'direction_actual', 'direction_predicted',
-                      'direction_correct', 'success_status', 'confidence_score',
-                      'model_name', 'prediction_horizon']
-            
-            df = pd.DataFrame(results, columns=columns)
-            
-            print("\n📊 Database Predictions:")
-            print("=" * 100)
-            print(df.to_string(index=False))
-            print("=" * 100)
-            
-            # Print summary statistics
-            print("\n📈 Summary Statistics:")
-            print(f"Total records shown: {len(df)}")
-            print(f"Success rate: {(df['success_status'] == 'SUCCESS').mean()*100:.1f}%")
-            print(f"Average error: {df['percentage_error'].mean():.2f}%")
-            print(f"Direction accuracy: {df['direction_correct'].mean()*100:.1f}%")
-            
-            return df
-            
+                if not results:
+                    print("No predictions found in database")
+                    return None
+                
+                # Convert to DataFrame for better display
+                df = pd.DataFrame([result.dict() for result in results])
+                
+                print("\n📊 Database Predictions:")
+                print("=" * 100)
+                print(df.to_string(index=False))
+                print("=" * 100)
+                
+                # Print summary statistics
+                print("\n📈 Summary Statistics:")
+                print(f"Total records shown: {len(df)}")
+                print(f"Success rate: {(df['success_status'] == 'SUCCESS').mean()*100:.1f}%")
+                print(f"Average error: {df['percentage_error'].mean():.2f}%")
+                print(f"Direction accuracy: {df['direction_correct'].mean()*100:.1f}%")
+                
+                return df
+                
         except Exception as e:
             print(f"❌ Error viewing predictions: {str(e)}")
             return None
@@ -583,8 +504,7 @@ class PredictionValidator:
             within_threshold, direction_correct, confidence_score
         )
         
-        return PredictionResult(
-            id=str(uuid.uuid4()),
+        return PredictionResult.create(
             timestamp=str(timestamp),
             actual_price=round(actual_price, 2),
             predicted_price=round(predicted_price, 2),
@@ -651,16 +571,15 @@ class PredictionValidator:
         print(f"   Environment: {ENVIRONMENT}")
         print(f"   Total results: {len(results)}")
         
-        # Create .outputs directory if it doesn't exist
-        output_dir = Path('.outputs')
-        output_dir.mkdir(exist_ok=True)
+        # Create output directory if it doesn't exist
+        OUTPUT_DIR.mkdir(exist_ok=True)
         
         if not filename:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'prediction_validation_{timestamp}.csv'
         
         # Convert to DataFrame
-        df = pd.DataFrame([asdict(result) for result in results])
+        df = pd.DataFrame([result.to_dict() for result in results])
         
         # Add summary statistics
         total_predictions = len(df)
@@ -696,8 +615,8 @@ class PredictionValidator:
         summary_df = pd.DataFrame([summary_data])
         final_df = pd.concat([df, summary_df], ignore_index=True)
         
-        # Save to CSV in .outputs directory
-        output_path = output_dir / filename
+        # Save to CSV in output directory
+        output_path = OUTPUT_DIR / filename
         final_df.to_csv(output_path, index=False)
         print(f"✅ CSV saved to: {output_path.absolute()}")
         
@@ -726,11 +645,6 @@ class PredictionValidator:
         print(f"🔒 Avg Confidence: {avg_confidence:.3f}")
         
         return str(output_path)
-    
-    def __del__(self):
-        """Cleanup database connection"""
-        if hasattr(self, 'db_manager'):
-            self.db_manager.close()
 
 def generate_validation_data(days: int = 200, start_price: float = 50000) -> pd.DataFrame:
     """Generate test data for validation"""
@@ -879,7 +793,7 @@ def main():
             print(f"\n📋 SAMPLE RESULTS (first 5):")
             print("-" * 70)
             
-            sample_df = pd.DataFrame([asdict(r) for r in results[:5]])
+            sample_df = pd.DataFrame([r.to_dict() for r in results[:5]])
             print(sample_df[['timestamp', 'actual_price', 'predicted_price', 
                            'percentage_error', 'direction_correct', 'success_status']].to_string(index=False))
         
@@ -893,7 +807,7 @@ def main():
         
     except Exception as e:
         print(f"❌ Error during validation: {e}")
-        print(f"💡 Make sure you have trained models in .outputs directory")
+        print(f"💡 Make sure you have trained models in {OUTPUT_DIR} directory")
 
 if __name__ == "__main__":
     main()

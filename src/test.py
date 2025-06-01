@@ -25,6 +25,7 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
+from core.setup_path import OUTPUT_DIR
 
 # Set style for better plots
 plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
@@ -164,8 +165,8 @@ class BitcoinDataset(Dataset):
 class ModelFinder:
     """Utility class to find and manage saved models"""
     
-    def __init__(self, base_output_dir: Union[str, Path] = '.outputs'):
-        self.base_output_dir = Path(base_output_dir)
+    def __init__(self, base_output_dir: Union[str, Path] = None):
+        self.base_output_dir = Path(base_output_dir) if base_output_dir else OUTPUT_DIR
     
     def find_all_models(self) -> List[ModelInfo]:
         """Find all saved models in output directory"""
@@ -825,7 +826,7 @@ def main():
         print("   2. PyTorch 2.6+ compatibility issues with sklearn objects")
         print("\n💡 Solutions:")
         print("   1. Train a model first by running your main training script")
-        print("   2. Make sure model files are in .outputs directory")
+        print(f"   2. Make sure model files are in {OUTPUT_DIR} directory")
         return
     
     print(f"\n🎯 Testing latest model: {latest_model.name}")

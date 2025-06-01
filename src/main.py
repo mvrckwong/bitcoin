@@ -10,6 +10,7 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
+from core.setup_path import OUTPUT_DIR
 
 class BitcoinPredictionPipeline:
     """
@@ -17,13 +18,13 @@ class BitcoinPredictionPipeline:
     """
     def __init__(self, sequence_length: int = 60, hidden_size: int = 128, 
                  num_layers: int = 2, learning_rate: float = 0.001,
-                 model_type: str = 'lstm', output_dir: str = '.outputs'):
+                 model_type: str = 'lstm', output_dir: str = None):
         self.sequence_length = sequence_length
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.model_type = model_type
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir) if output_dir else OUTPUT_DIR
         
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -474,15 +475,6 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
                  resume_checkpoint: Optional[str] = None):
     """
     Example of how to use the pipeline for different scenarios with checkpointing
-    
-    Args:
-        epochs: Number of training epochs
-        batch_size: Training batch size
-        sequence_length: Length of input sequences
-        hidden_size: Size of hidden layers
-        learning_rate: Learning rate for optimizer
-        num_layers: Number of RNN layers
-        resume_checkpoint: Optional checkpoint file to resume from
     """
     
     print("=" * 60)
@@ -514,7 +506,7 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
         hidden_size=hidden_size,
         num_layers=num_layers,
         learning_rate=learning_rate,
-        output_dir=Path('.outputs') / 'price_only'
+        output_dir=OUTPUT_DIR / 'price_only'
     )
     
     # Show existing checkpoints
@@ -574,7 +566,7 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
         hidden_size=hidden_size * 2,  # Larger hidden size for multi-feature
         num_layers=num_layers + 1,    # Extra layer for complexity
         learning_rate=learning_rate,
-        output_dir=Path('.outputs') / 'multi_feature'
+        output_dir=OUTPUT_DIR / 'multi_feature'
     )
     pipeline_enhanced.prepare_data(df_enhanced, target_col='close', feature_cols=feature_cols)
     
@@ -621,7 +613,7 @@ def example_usage(epochs: int = 50, batch_size: int = 32, sequence_length: int =
     print("\n💡 To resume training from a checkpoint, use:")
     print("   pipeline.train(epochs=100, resume_from_checkpoint='checkpoint_epoch_50.pth')")
     print("\n💡 To load a trained model for inference:")
-    print("   model, data = load_trained_model('.outputs/price_only/final_model_*.pth')")
+    print(f"   model, data = load_trained_model('{OUTPUT_DIR}/price_only/final_model_*.pth')")
     
     return pipeline, pipeline_enhanced
 
@@ -667,9 +659,8 @@ if __name__ == "__main__":
     USE_CONFIG = None  # Set to 'quick_test' or 'production' to use preset configs
     
     # Create outputs directory
-    outputs_dir = Path('.outputs')
-    outputs_dir.mkdir(exist_ok=True)
-    print(f"📁 Output directory: {outputs_dir}")
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    print(f"📁 Output directory: {OUTPUT_DIR}")
     
     if USE_CONFIG and USE_CONFIG in CONFIGS:
         config = CONFIGS[USE_CONFIG]

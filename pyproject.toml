@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "scikit-learn>=1.6.1",
     "seaborn>=0.13.2",
+    "sqlmodel>=0.0.24",
     "torch>=2.7.0",
     "tqdm>=4.67.1",
 ]
