@@ -1,229 +1,59 @@
+"""
+Optimized Bitcoin Prediction Validator.
+
+This module provides the main prediction validation functionality, leveraging
+modularized components for model loading, data handling, and database operations.
+The code has been refactored to remove redundancy and improve maintainability.
+"""
+
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from models import calculate_rsi
-from core.setup_path import OUTPUT_DIR
+from models import BitcoinDataset, ModelLoader
+from core import generate_validation_data, load_data_from_csv, OUTPUT_DIR
 from database import DatabaseManager, PredictionResult
 from settings import (
-    ENVIRONMENT, ValidationConfig, ModelConfig,
-    DataConfig, PREDICTION_HORIZONS, MIN_PRICE, MAX_PRICE,
-    create_custom_config
+    ENVIRONMENT, ValidationConfig, DataConfig,
+    PREDICTION_HORIZONS, create_custom_config
 )
 
 warnings.filterwarnings('ignore')
 
 
-class BitcoinPredictor(nn.Module):
-    """Recreated model architecture for loading saved models"""
-
-    def __init__(self, input_size: int, hidden_size: int = 128,
-                 num_layers: int = 2, dropout: float = 0.2,
-                 model_type: str = 'lstm'):
-        super(BitcoinPredictor, self).__init__()
-
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.model_type = model_type.lower()
-
-        if self.model_type == 'lstm':
-            self.rnn = nn.LSTM(
-                input_size, hidden_size, num_layers,
-                batch_first=True,
-                dropout=dropout if num_layers > 1 else 0
-            )
-        elif self.model_type == 'gru':
-            self.rnn = nn.GRU(
-                input_size, hidden_size, num_layers,
-                batch_first=True,
-                dropout=dropout if num_layers > 1 else 0
-            )
-
-        self.attention = nn.MultiheadAttention(
-            hidden_size, num_heads=8, batch_first=True
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
-        self.fc2 = nn.Linear(hidden_size // 2, 1)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        rnn_out, _ = self.rnn(x)
-        last_output = rnn_out[:, -1, :]
-        out = self.dropout(last_output)
-        out = self.relu(self.fc1(out))
-        out = self.dropout(out)
-        out = self.fc2(out)
-        return out.squeeze(-1)
-
-
-class BitcoinDataset(Dataset):
-    """Dataset for prediction validation"""
-
-    def __init__(self, data: pd.DataFrame, sequence_length: int = 60,
-                 target_col: str = None,
-                 feature_cols: Optional[List[str]] = None,
-                 scalers: Optional[Dict] = None):
-        # Use DataConfig defaults
-        data_config = DataConfig()
-        self.sequence_length = sequence_length
-        self.target_col = target_col or data_config.target_column
-
-        if feature_cols is None:
-            feature_cols = data_config.default_features
-
-        self.feature_cols = feature_cols
-        if self.target_col not in feature_cols:
-            cols = feature_cols + [self.target_col]
-        else:
-            cols = feature_cols
-        self.data = data[cols].copy()
-
-        # Handle scalers
-        if scalers:
-            self.scalers = scalers
-            self.scaled_data = self.data.copy()
-            for col in self.data.columns:
-                if col in self.scalers:
-                    transformed = self.scalers[col].transform(self.data[[col]])
-                    self.scaled_data[col] = transformed
-        else:
-            self.scalers = {}
-            self.scaled_data = self.data.copy()
-            for col in self.data.columns:
-                scaler = MinMaxScaler()
-                transformed = scaler.fit_transform(self.data[[col]])
-                self.scaled_data[col] = transformed
-                self.scalers[col] = scaler
-
-        self.sequences, self.targets, self.timestamps = self._create_sequences()
-
-    def _create_sequences(self):
-        sequences = []
-        targets = []
-        timestamps = []
-
-        for i in range(len(self.scaled_data) - self.sequence_length):
-            seq_start = i
-            seq_end = i + self.sequence_length
-            seq_features = self.scaled_data[self.feature_cols].iloc[
-                seq_start:seq_end
-            ].values
-            sequences.append(seq_features)
-
-            target = self.scaled_data[self.target_col].iloc[
-                i + self.sequence_length
-            ]
-            targets.append(target)
-
-            # Store timestamp for the prediction
-            if 'date' in self.data.columns:
-                timestamp = self.data['date'].iloc[i + self.sequence_length]
-            else:
-                timestamp = i + self.sequence_length
-            timestamps.append(timestamp)
-
-        sequences_array = np.array(sequences, dtype=np.float32)
-        targets_array = np.array(targets, dtype=np.float32)
-
-        return (torch.FloatTensor(sequences_array),
-                torch.FloatTensor(targets_array),
-                timestamps)
-
-    def __len__(self):
-        return len(self.sequences)
-
-    def __getitem__(self, idx):
-        return self.sequences[idx], self.targets[idx], self.timestamps[idx]
-
-    def inverse_transform_target(self, scaled_target):
-        transformed = self.scalers[self.target_col].inverse_transform(
-            [[scaled_target]]
-        )
-        return transformed[0][0]
-
-
-class ModelLoader:
-    """Utility to load trained models"""
-
-    @staticmethod
-    def load_latest_model(base_dir: str = None) -> Optional[Tuple]:
-        """Load the latest trained model"""
-        base_path = Path(base_dir) if base_dir else OUTPUT_DIR
-
-        if not base_path.exists():
-            print(f"❌ Output directory not found: {base_path}")
-            return None
-
-        # Find latest model
-        latest_model = None
-        latest_time = datetime.min
-
-        for model_file in base_path.rglob('final_model_*.pth'):
-            try:
-                stem_parts = model_file.stem.split('_')
-                timestamp_str = f"{stem_parts[-2]}_{stem_parts[-1]}"
-                timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
-
-                if timestamp > latest_time:
-                    latest_time = timestamp
-                    latest_model = model_file
-            except Exception:
-                continue
-
-        if not latest_model:
-            print("❌ No models found")
-            return None
-
-        return ModelLoader.load_model(latest_model)
-
-    @staticmethod
-    def load_model(model_path: Path) -> Tuple:
-        """Load a specific model"""
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # Load model data
-        model_data = torch.load(model_path, map_location=device,
-                                weights_only=False)
-        config = model_data['model_config']
-
-        # Recreate model
-        model = BitcoinPredictor(
-            input_size=config['input_size'],
-            hidden_size=config['hidden_size'],
-            num_layers=config['num_layers'],
-            model_type=config['model_type']
-        ).to(device)
-
-        # Load weights
-        model.load_state_dict(model_data['model_state_dict'])
-        model.eval()
-
-        return model, model_data, config, device
-
-
 class PredictionValidator:
-    """Main class for prediction validation"""
+    """
+    Main class for prediction validation.
+    
+    This class handles the core prediction validation logic, including:
+    - Loading trained models
+    - Making predictions on test data
+    - Calculating validation metrics
+    - Exporting results to CSV and database
+    """
 
     def __init__(self, model_path: Optional[str] = None,
                  config: Optional[ValidationConfig] = None):
+        """
+        Initialize the prediction validator.
+        
+        Args:
+            model_path: Optional path to a specific model file.
+            config: Optional validation configuration.
+        """
         self.config = config or ValidationConfig()
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
         self.db_manager = DatabaseManager()
 
-        # Load model
+        # Load model using the modularized ModelLoader
         if model_path:
             model_result = ModelLoader.load_model(Path(model_path))
             self.model, self.model_data, self.model_config, self.device = model_result
@@ -241,8 +71,16 @@ class PredictionValidator:
     def predict_and_validate(self, test_data: pd.DataFrame,
                              prediction_horizons: List[str] = ['1day']
                              ) -> List[PredictionResult]:
-        """Make predictions and validate against actual data"""
-
+        """
+        Make predictions and validate against actual data.
+        
+        Args:
+            test_data: DataFrame containing test data.
+            prediction_horizons: List of prediction horizons to evaluate.
+            
+        Returns:
+            List of PredictionResult objects containing validation metrics.
+        """
         print(f"\n🔮 Starting prediction validation...")
         print(f"   📅 Test data: {len(test_data)} records")
         print(f"   ⏰ Horizons: {', '.join(prediction_horizons)}")
@@ -258,16 +96,37 @@ class PredictionValidator:
 
     def _process_horizon(self, data: pd.DataFrame,
                          horizon: str) -> List[PredictionResult]:
-        """Process predictions for a specific time horizon"""
-
-        # Create dataset
+        """
+        Process predictions for a specific time horizon.
+        
+        Args:
+            data: DataFrame containing the data for predictions.
+            horizon: Time horizon for predictions.
+            
+        Returns:
+            List of PredictionResult objects for this horizon.
+            
+        Note:
+            Timestamps in results represent when predictions were executed,
+            not the time period being predicted.
+        """
+        # Validate data has sufficient records for sequence creation
+        min_required = self.model_config['sequence_length'] + 1
+        if len(data) < min_required:
+            raise ValueError(
+                f"Insufficient data for predictions. "
+                f"Need at least {min_required} records, got {len(data)}."
+            )
+        
+        # Create dataset using the modularized BitcoinDataset
         training_scalers = self.model_data.get('dataset_scalers', {})
         dataset = BitcoinDataset(
             data=data,
             sequence_length=self.model_config['sequence_length'],
             target_col='close',
             feature_cols=self.model_config['feature_cols'],
-            scalers=training_scalers
+            scalers=training_scalers,
+            include_timestamps=False  # Don't use the dataset's timestamp logic
         )
 
         results = []
@@ -277,7 +136,11 @@ class PredictionValidator:
         with torch.no_grad():
             desc = f"Predicting {horizon}"
             for i in tqdm(range(len(dataset)), desc=desc, unit="sample"):
-                sequence, target, timestamp = dataset[i]
+                # Capture current execution time for this specific prediction
+                current_time = datetime.now()
+                timestamp = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                
+                sequence, target = dataset[i]
                 sequence = sequence.unsqueeze(0).to(self.device)
 
                 # Get prediction
@@ -308,8 +171,21 @@ class PredictionValidator:
                                      index: int, data: pd.DataFrame,
                                      dataset: BitcoinDataset
                                      ) -> PredictionResult:
-        """Calculate detailed prediction result"""
-
+        """
+        Calculate detailed prediction result.
+        
+        Args:
+            timestamp: Timestamp of the prediction.
+            actual_price: Actual price value.
+            predicted_price: Predicted price value.
+            horizon: Prediction horizon.
+            index: Index in the dataset.
+            data: Original data DataFrame.
+            dataset: Dataset object for inverse transforms.
+            
+        Returns:
+            PredictionResult object with all calculated metrics.
+        """
         # Basic metrics
         absolute_error = abs(predicted_price - actual_price)
         percentage_error = (absolute_error / actual_price) * 100
@@ -368,7 +244,16 @@ class PredictionValidator:
         )
 
     def _get_direction(self, prev_price: float, current_price: float) -> str:
-        """Determine price direction"""
+        """
+        Determine price direction.
+        
+        Args:
+            prev_price: Previous price value.
+            current_price: Current price value.
+            
+        Returns:
+            Direction string: 'UP', 'DOWN', or 'FLAT'.
+        """
         change_percent = ((current_price - prev_price) / prev_price) * 100
 
         if abs(change_percent) < self.config.flat_threshold_percent:
@@ -380,7 +265,16 @@ class PredictionValidator:
 
     def _calculate_confidence(self, percentage_error: float,
                               direction_correct: bool) -> float:
-        """Calculate confidence score (0-1)"""
+        """
+        Calculate confidence score (0-1).
+        
+        Args:
+            percentage_error: Percentage error of the prediction.
+            direction_correct: Whether direction prediction was correct.
+            
+        Returns:
+            Confidence score between 0 and 1.
+        """
         # Price accuracy component (0-1, higher is better)
         threshold_factor = self.config.price_threshold_percent * 2
         price_component = max(0, 1 - (percentage_error / threshold_factor))
@@ -399,8 +293,17 @@ class PredictionValidator:
     def _determine_success(self, within_threshold: bool,
                            direction_correct: bool,
                            confidence_score: float) -> str:
-        """Determine overall success status"""
-
+        """
+        Determine overall success status.
+        
+        Args:
+            within_threshold: Whether error is within acceptable threshold.
+            direction_correct: Whether direction prediction was correct.
+            confidence_score: Calculated confidence score.
+            
+        Returns:
+            Success status: 'SUCCESS', 'PARTIAL', or 'FAILED'.
+        """
         if confidence_score >= self.config.min_confidence_threshold:
             if within_threshold and direction_correct:
                 return 'SUCCESS'
@@ -413,8 +316,16 @@ class PredictionValidator:
 
     def export_to_csv(self, results: List[PredictionResult],
                       filename: Optional[str] = None) -> str:
-        """Export results to CSV format and optionally to database"""
-
+        """
+        Export results to CSV format and optionally to database.
+        
+        Args:
+            results: List of PredictionResult objects.
+            filename: Optional filename for the CSV file.
+            
+        Returns:
+            Path to the exported CSV file.
+        """
         print(f"\n📊 Exporting results...")
         print(f"   Environment: {ENVIRONMENT}")
         print(f"   Total results: {len(results)}")
@@ -509,65 +420,14 @@ class PredictionValidator:
         return str(output_path)
 
 
-def generate_validation_data(days: int = 200,
-                             start_price: float = 50000) -> pd.DataFrame:
-    """Generate test data for validation"""
-    print(f"🔢 Generating {days} days of validation data...")
-
-    # Create realistic price data with trends and volatility
-    dates = pd.date_range(start='2024-02-01', periods=days, freq='D')
-    np.random.seed(456)  # Different seed for validation
-
-    # More realistic price simulation
-    prices = [start_price]
-    for i in range(1, days):
-        # Add trend, mean reversion, and volatility
-        prev_price = prices[-1]
-
-        # Random walk with slight upward bias
-        trend = 0.0005  # 0.05% daily upward trend
-        volatility = 0.025  # 2.5% daily volatility
-
-        # Add some mean reversion
-        if len(prices) > 20:
-            sma_20 = np.mean(prices[-20:])
-            mean_reversion = (sma_20 - prev_price) / prev_price * 0.1
-        else:
-            mean_reversion = 0
-
-        change = np.random.normal(trend + mean_reversion, volatility)
-        new_price = prev_price * (1 + change)
-
-        # Prevent unrealistic prices using settings constants
-        new_price = max(new_price, MIN_PRICE)
-        new_price = min(new_price, MAX_PRICE)
-
-        prices.append(new_price)
-
-    df = pd.DataFrame({
-        'date': dates,
-        'close': prices
-    })
-
-    # Add required features using DataConfig
-    data_config = DataConfig()
-    df['volume'] = np.random.randint(15000, 60000, len(df))
-    df['volatility'] = df['close'].rolling(20, min_periods=1).std().fillna(0)
-    df['sma_20'] = df['close'].rolling(20, min_periods=1).mean()
-    df['rsi'] = calculate_rsi(df['close']).fillna(50)
-
-    print(f"✅ Validation data generated")
-    price_min = df['close'].min()
-    price_max = df['close'].max()
-    print(f"   📊 Price range: ${price_min:,.2f} - ${price_max:,.2f}")
-    price_change = ((df['close'].iloc[-1] / df['close'].iloc[0]) - 1) * 100
-    print(f"   📈 Total change: {price_change:.1f}%")
-
-    return df
-
-
 def main():
-    """Main function"""
+    """
+    Main function for running prediction validation.
+    
+    This function provides an interactive interface for users to:
+    1. Run prediction validation with custom or generated data
+    2. View existing database predictions
+    """
     print("🔮 BITCOIN PREDICTION VALIDATOR")
     print("=" * 40)
 
@@ -605,14 +465,7 @@ def main():
         if use_custom == 'y':
             file_path = input("Enter CSV file path: ").strip()
             try:
-                test_data = pd.read_csv(file_path)
-                if 'date' not in test_data.columns:
-                    test_data['date'] = pd.date_range(
-                        start='2024-01-01',
-                        periods=len(test_data),
-                        freq='D'
-                    )
-                print(f"✅ Loaded {len(test_data)} records from {file_path}")
+                test_data = load_data_from_csv(file_path)
             except Exception as e:
                 print(f"❌ Error loading file: {e}")
                 print("🔄 Falling back to generated data")

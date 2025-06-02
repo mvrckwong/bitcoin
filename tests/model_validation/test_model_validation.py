@@ -25,7 +25,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
+from models.models import BitcoinPredictor, BitcoinDataset, calculate_rsi
 from core.setup_path import OUTPUT_DIR
 
 # Set style for better plots

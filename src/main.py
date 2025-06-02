@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
-from models import BitcoinPredictor, BitcoinDataset, calculate_rsi
+from models.models import BitcoinPredictor, BitcoinDataset, calculate_rsi
 from core.setup_path import OUTPUT_DIR
 
 class BitcoinPredictionPipeline:
