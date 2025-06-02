@@ -9,6 +9,17 @@ from pathlib import Path
 from loguru import logger
 from datetime import datetime
 
+# Try to import LOGS_DIR, fallback to local path if running directly
+try:
+    from .setup_path import LOGS_DIR
+except ImportError:
+    # When running directly, use relative import or fallback
+    try:
+        from setup_path import LOGS_DIR
+    except ImportError:
+        # Fallback to hardcoded path if setup_path not available
+        LOGS_DIR = Path(".logs")
+
 
 class LoguruConfig:
     """Configuration class for loguru setup"""
@@ -18,7 +29,7 @@ class LoguruConfig:
         logger.remove()
         
         # Configuration settings
-        self.log_dir = Path("logs")
+        self.log_dir = LOGS_DIR
         self.log_dir.mkdir(exist_ok=True)
         
         # Log file settings
@@ -115,8 +126,18 @@ class LoguruConfig:
             )
         
         # Add custom log level
-        logger.level("TRACE", no=5, color="<white>")
-        logger.level("SUCCESS", no=25, color="<green><bold>")
+        # Check if level exists before creating it
+        try:
+            logger.level("TRACE", no=5, color="<white>")
+        except ValueError:
+            # Level already exists, that's fine
+            pass
+        
+        try:
+            logger.level("SUCCESS", no=25, color="<green><bold>")
+        except ValueError:
+            # Level already exists, that's fine
+            pass
         
         return logger
 
