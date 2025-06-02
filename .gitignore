@@ -2,7 +2,11 @@
 uv.lock
 *.pth
 *.ipynb
+
 .outputs/*.csv
+.outputs/*.json
+.outputs/*.png
+.outputs/*.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
