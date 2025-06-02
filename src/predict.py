@@ -34,13 +34,12 @@ from core.setup_logging import (
 warnings.filterwarnings('ignore')
 
 # Setup logging based on environment
-if ENVIRONMENT == 'production':
+if ENVIRONMENT == 'production' or ENVIRONMENT == 'prod':
     logger = setup_production_logging("bitcoin-predictor")
-elif ENVIRONMENT == 'staging':
+elif ENVIRONMENT == 'staging' or ENVIRONMENT == 'stg':
     logger = setup_staging_logging("bitcoin-predictor")
 else:
     logger = setup_development_logging("bitcoin-predictor")
-
 
 class PredictionValidator:
     """
