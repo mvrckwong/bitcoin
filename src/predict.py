@@ -31,11 +31,11 @@ from core.setup_logging import (
     log_system_metrics, get_logger_for_service
 )
 
-warnings.filterwarnings('ignore')
 
-# Setup logging based on environment
+# Setup based on the environment
 if ENVIRONMENT == 'production' or ENVIRONMENT == 'prod':
     logger = setup_production_logging("bitcoin-predictor")
+    warnings.filterwarnings('ignore')
 elif ENVIRONMENT == 'staging' or ENVIRONMENT == 'stg':
     logger = setup_staging_logging("bitcoin-predictor")
 else:
